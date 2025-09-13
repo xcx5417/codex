@@ -1,0 +1,178 @@
+//@version=5
+indicator("Swing High / Low MTF (Lines Only + Auto-Merge)", overlay=true, max_lines_count=500)
+
+// ---------- Inputs ----------
+swingHighStrength = input.int(5, "Swing High Strength", minval=1)
+swingLowStrength  = input.int(5, "Swing Low Strength",  minval=1)
+srcHigh           = input.source(high, "High Source")
+srcLow            = input.source(low,  "Low Source")
+lineLength        = input.int(50, "Line Length (bars)", minval=1)
+mtf               = input.timeframe("5", "MTF (Higher TF)")
+mergePct          = input.float(0.4, "Merge Threshold (% of price)", minval=0.1, step=0.1) / 100
+mergeToggle       = input.bool(true, "Enable Merge (On/Off)")
+
+// ---------- RSI filter inputs ----------
+rsiLen   = input.int(14, "RSI Length")
+rsiLoThr = input.int(40, "RSI Low Threshold")
+rsiHiThr = input.int(60, "RSI High Threshold")
+
+// ---------- Lists ----------
+var line[] highLines = array.new_line()
+var line[] lowLines  = array.new_line()
+
+// ---------- Higher-TF Swing Points + RSI ----------
+[ph, ph_time, ph_rsi] = request.security(syminfo.tickerid, mtf,
+                             [ta.pivothigh(srcHigh, swingHighStrength, swingHighStrength),
+                              time[swingHighStrength],
+                              ta.rsi(close, rsiLen)[swingHighStrength]],
+                             lookahead = barmerge.lookahead_on)
+
+[pl, pl_time, pl_rsi] = request.security(syminfo.tickerid, mtf,
+                             [ta.pivotlow(srcLow, swingLowStrength, swingLowStrength),
+                              time[swingLowStrength],
+                              ta.rsi(close, rsiLen)[swingLowStrength]],
+                             lookahead = barmerge.lookahead_on)
+
+// ---------- Helper: Merge nearby lines (ALL lines together) ----------
+remove_nearby_all(price, threshold) =>
+    var line[] allLines = array.new_line()
+    array.clear(allLines)
+    for l in highLines
+        array.push(allLines, l)
+    for l in lowLines
+        array.push(allLines, l)
+
+    int i = array.size(allLines) - 1
+    while i >= 0
+        line l = array.get(allLines, i)
+        float linePrice = line.get_y1(l)
+        if math.abs(linePrice - price) / price <= threshold
+            int hIdx = array.indexof(highLines, l)
+            if hIdx >= 0
+                array.remove(highLines, hIdx)
+            else
+                int lIdx = array.indexof(lowLines, l)
+                if lIdx >= 0
+                    array.remove(lowLines, lIdx)
+            line.delete(l)
+        i -= 1
+
+// ---------- Draw / Merge Lines ----------
+if not na(ph) and ph_rsi >= rsiHiThr
+    if mergeToggle
+        remove_nearby_all(ph, mergePct)
+    line l = line.new(ph_time, ph,
+                      ph_time + lineLength * timeframe.in_seconds(mtf) * 1000, ph,
+                      xloc = xloc.bar_time, color = color.red, width = 2)
+    array.push(highLines, l)
+
+if not na(pl) and pl_rsi <= rsiLoThr
+    if mergeToggle
+        remove_nearby_all(pl, mergePct)
+    line l = line.new(pl_time, pl,
+                      pl_time + lineLength * timeframe.in_seconds(mtf) * 1000, pl,
+                      xloc = xloc.bar_time, color = color.teal, width = 2)
+    array.push(lowLines, l)
+
+// ---------- Optional cleanup ----------
+if array.size(highLines) > 100
+    line.delete(array.shift(highLines))
+if array.size(lowLines) > 100
+    line.delete(array.shift(lowLines))
+// ═══════════════════════════════════════════════════════════════════════════════════════
+//  بخش دوم – BUY اصلاح‌شده: تمام خطوط High&Low ، سیگنال فقط در طول عمر خط
+// ═══════════════════════════════════════════════════════════════════════════════════════
+
+bbLen   = input.int(20, "BB Length برای BB%b")
+bbMult  = input.float(2.0, "BB StdDev برای BB%b")
+bbSrc   = input(close, "BB Source")
+
+basisBB = ta.sma(bbSrc, bbLen)
+devBB   = bbMult * ta.stdev(bbSrc, bbLen)
+upperBB = basisBB + devBB
+lowerBB = basisBB - devBB
+bbValue = (bbSrc - lowerBB) / (upperBB - lowerBB)
+
+var float activeSwingPrice    = na
+var float lowestLowSinceBreak = na
+var int   barsSinceBreak      = 0
+var bool  cycleActive         = false
+var line  activeLine          = na
+
+// ---------- شناسایی برخورد به تمام خطوط (High و Low جداگانه) ----------
+float currentLowestSwing = na
+line  touchedLine        = na
+
+for l in highLines
+    left  = int(line.get_x1(l))
+    right = int(line.get_x2(l))
+    price = line.get_y1(l)
+    if time >= left and time <= right and low <= price and high >= price
+        currentLowestSwing := price
+        touchedLine        := l
+        break
+if na(currentLowestSwing)
+    for l in lowLines
+        left  = int(line.get_x1(l))
+        right = int(line.get_x2(l))
+        price = line.get_y1(l)
+        if time >= left and time <= right and low <= price and high >= price
+            currentLowestSwing := price
+            touchedLine        := l
+            break
+
+// ---------- شروع چرخه (فقط اگر همان خط هنوز فعال باشد) ----------
+bool isRedCandle   = close < open
+bool breakHappened = false
+
+if not cycleActive
+    for l in highLines
+        left  = int(line.get_x1(l))
+        right = int(line.get_x2(l))
+        price = line.get_y1(l)
+        if time >= left and time <= right and low <= price and high >= price and isRedCandle and (bbValue < 0)
+            currentLowestSwing := price
+            touchedLine        := l
+            breakHappened      := true
+            break
+    if not breakHappened
+        for l in lowLines
+            left  = int(line.get_x1(l))
+            right = int(line.get_x2(l))
+            price = line.get_y1(l)
+            if time >= left and time <= right and low <= price and high >= price and isRedCandle and (bbValue < 0)
+                currentLowestSwing := price
+                touchedLine        := l
+                breakHappened      := true
+                break
+
+if breakHappened
+    cycleActive         := true
+    activeSwingPrice    := currentLowestSwing
+    lowestLowSinceBreak := low
+    barsSinceBreak      := 0
+    activeLine          := touchedLine
+
+// ---------- ادامه چرخه (سیگنال فقط در طول عمر همان خط) ----------
+if cycleActive
+    barsSinceBreak += 1
+    if isRedCandle and (low < lowestLowSinceBreak) and (bbValue < 0)
+        lowestLowSinceBreak := low
+
+    bool signalBuy = isRedCandle and (low < lowestLowSinceBreak) and (bbValue > 0)
+
+    if signalBuy
+        left = int(line.get_x1(activeLine))
+        right = int(line.get_x2(activeLine))
+        if time >= left and time <= right
+            label.new(bar_index, low, "BUY@" + str.tostring(lowestLowSinceBreak, format.mintick),
+                      style = label.style_label_up, color = color.green, textcolor = color.white, size = size.small)
+            alert("BUY @{{ticker}}", alert.freq_once_per_bar)
+        cycleActive := false
+
+    // پایان چرخه اگر خط تمام شده باشد (مهم!)
+    else if time > int(line.get_x2(activeLine))
+        cycleActive := false
+
+    else if barsSinceBreak >= 50 or (not na(currentLowestSwing) and currentLowestSwing != activeSwingPrice)
+        cycleActive := false
